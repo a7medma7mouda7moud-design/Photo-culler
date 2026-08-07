@@ -1,33 +1,40 @@
+import base64
 import json
-import time
+import io
 from PIL import Image
 import streamlit as st
-from google import genai
-from google.genai import types
+from openai import OpenAI
 
 st.set_page_config(
     page_title="AI Photo Culler", layout="wide", initial_sidebar_state="collapsed"
 )
 
-st.title("📸 مساعد فرز الصور الذكي")
-st.caption("افرز صورك بذكاء من الآيفون واعرف أسباب التقييم بدقة")
+st.title("📸 مساعد فرز الصور الذكي (ChatGPT)")
+st.caption("افرز صورك بذكاء من الآيفون باستعمال GPT-4o")
 
 with st.sidebar:
   st.header("⚙️ الإعدادات")
-  api_key = st.text_input("أدخل مفتاح Gemini API Key:", type="password")
-  st.markdown("[احصل على مفتاح مجاني من هنا](https://aistudio.google.com/)")
+  api_key = st.text_input("أدخل مفتاح OpenAI API Key:", type="password")
+  st.markdown("[احصل على مفتاح من OpenAI](https://platform.openai.com/api-keys)")
 
 if not api_key:
-  st.info("👈 يُرجى إدخال API Key من القائمة الجانبية (Sidebar) للبدء.")
+  st.info("👈 يُرجى إدخال OpenAI API Key من القائمة الجانبية (Sidebar) للبدء.")
   st.stop()
 
-client = genai.Client(api_key=api_key)
+client = OpenAI(api_key=api_key)
 
 uploaded_files = st.file_uploader(
     "اختر الصور من ألبوم الآيفون (JPG/PNG)",
     type=["jpg", "jpeg", "png"],
     accept_multiple_files=True,
 )
+
+
+def encode_image(image):
+  buffered = io.BytesIO()
+  image.save(buffered, format="JPEG")
+  return base64.b64encode(buffered.getvalue()).decode("utf-8")
+
 
 if uploaded_files:
   if st.button(
@@ -38,47 +45,48 @@ if uploaded_files:
 
     prompt = """
         أنت خبير تقييم صور ومساعد فرز للمصورين المحترفين.
-        قم بتحليل هذه الصورة بدقة شديدة وأخرج النتيجة بصيغة JSON حصراً باللغة العربية.
-        
-        يجب أن يحتوي الـ JSON على:
-        - overall_score: رقم من 10 (مثل 9.2)
-        - category: اختر واحدة فقط من ("أفضل الصور", "تحتاج تعديل", "غير مناسبة")
-        - strengths: قائمة بالنقاط القوية
-        - detailed_reason: السبب الدقيق والواضح للتقييم.
-        - suggested_improvements: قائمة بالتحسينات المقترحة.
+        قم بتحليل هذه الصورة بدقة شديدة وأخرج النتيجة بصيغة JSON حصراً باللغة العربية دون أي مقدمات أو كود فلوكس بالصيغة التالية:
+        {
+          "overall_score": 8.5,
+          "category": "أفضل الصور",
+          "strengths": ["نقطة 1", "نقطة 2"],
+          "detailed_reason": "سبب التقييم",
+          "suggested_improvements": ["تحسين 1", "تحسين 2"]
+        }
+        خيارات الفئة (category) المتاحة هي فقط: ("أفضل الصور", "تحتاج تعديل", "غير مناسبة")
         """
 
     for idx, file in enumerate(uploaded_files):
-      img = Image.open(file)
-
-      # تصغير أبعاد الصورة لتسريع التحليل وتوفير الكوتا
+      img = Image.open(file).convert("RGB")
       img.thumbnail((1024, 1024))
+      base64_img = encode_image(img)
 
-      # إعادة المحاولة تلقائياً في حال وجود Rate Limit
-      max_retries = 3
-      for attempt in range(max_retries):
-        try:
-          response = client.models.generate_content(
-              model="gemini-2.0-flash",
-              contents=[img, prompt],
-              config=types.GenerateContentConfig(
-                  response_mime_type="application/json", temperature=0.2
-              ),
-          )
-          data = json.loads(response.text)
-          data["file_name"] = file.name
-          data["image"] = img
-          results.append(data)
-          break
-        except Exception as e:
-          if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-            if attempt < max_retries - 1:
-              time.sleep(5)  # الانتظار 5 ثواني قبل إعادة المحاولة
-              continue
-          st.error(f"حدث خطأ أثناء تحليل {file.name}: {e}")
+      try:
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            response_format={"type": "json_object"},
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{base64_img}"
+                        },
+                    },
+                ],
+            }],
+        )
 
-      # انتظار 3 ثوانٍ بين كل صورة والأخرى لتجنب تجاوز حد الطلبات
-      time.sleep(3)
+        data = json.loads(response.choices[0].message.content)
+        data["file_name"] = file.name
+        data["image"] = img
+        results.append(data)
+
+      except Exception as e:
+        st.error(f"حدث خطأ أثناء تحليل {file.name}: {e}")
+
       progress_bar.progress((idx + 1) / len(uploaded_files))
 
     st.success("تم التحليل بنجاح!")
